@@ -1,11 +1,13 @@
 import os
 import time
+from typing import Dict, Optional, Any
 
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from dcrnn_pytorch.lib import utils
+from dcrnn_pytorch.lib.utils import DataLoader, StandardScaler
 from dcrnn_pytorch.model.pytorch.dcrnn_model import DCRNNModel
 from dcrnn_pytorch.model.pytorch.loss import masked_mae_loss
 
@@ -13,7 +15,35 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class DCRNNSupervisor:
-    def __init__(self, adj_mx, **kwargs):
+    @staticmethod
+    def _validate_data(data: Dict[str, Any]) -> None:
+        """
+        Validate the data dictionary structure.
+
+        Args:
+            data: Dictionary containing train/val/test loaders and scaler
+
+        Raises:
+            ValueError: If data structure is invalid
+        """
+        required_keys = ['train_loader', 'val_loader', 'test_loader', 'scaler']
+        missing_keys = [key for key in required_keys if key not in data]
+
+        if missing_keys:
+            raise ValueError(f"Missing required keys in data: {missing_keys}")
+
+        # Validate loaders are DataLoader instances
+        for key in ['train_loader', 'val_loader', 'test_loader']:
+            if not isinstance(data[key], DataLoader):
+                raise ValueError(f"{key} must be an instance of dcrnn_pytorch.lib.utils.DataLoader, "
+                               f"got {type(data[key])}")
+
+        # Validate scaler is StandardScaler instance
+        if not isinstance(data['scaler'], StandardScaler):
+            raise ValueError(f"scaler must be an instance of dcrnn_pytorch.lib.utils.StandardScaler, "
+                           f"got {type(data['scaler'])}")
+
+    def __init__(self, adj_mx, data: Optional[Dict[str, Any]] = None, **kwargs):
         self._kwargs = kwargs
         self._data_kwargs = kwargs.get('data')
         self._model_kwargs = kwargs.get('model')
@@ -29,7 +59,11 @@ class DCRNNSupervisor:
         self._logger = utils.get_logger(self._log_dir, __name__, 'info.log', level=log_level)
 
         # data set
-        self._data = utils.load_dataset(**self._data_kwargs)
+        if data is None:
+            self._data = utils.load_dataset(**self._data_kwargs)
+        else:
+            self._validate_data(data)
+            self._data = data
         self.standard_scaler = self._data['scaler']
 
         self.num_nodes = int(self._model_kwargs.get('num_nodes', 1))
