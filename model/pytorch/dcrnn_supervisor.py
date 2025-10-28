@@ -5,9 +5,9 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from lib import utils
-from model.pytorch.dcrnn_model import DCRNNModel
-from model.pytorch.loss import masked_mae_loss
+from dcrnn_pytorch.lib import utils
+from dcrnn_pytorch.model.pytorch.dcrnn_model import DCRNNModel
+from dcrnn_pytorch.model.pytorch.loss import masked_mae_loss
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
