@@ -398,6 +398,10 @@ class DCRNNSupervisor:
                     optimizer = torch.optim.Adam(
                         self.dcrnn_model.parameters(), lr=base_lr, eps=epsilon
                     )
+                    # Recreate scheduler with the new optimizer
+                    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                        optimizer, milestones=steps, gamma=lr_decay_ratio
+                    )
 
                 loss = self._compute_loss(y, output)
 
@@ -415,12 +419,14 @@ class DCRNNSupervisor:
 
                 optimizer.step()
             self._logger.info("epoch complete")
-            lr_scheduler.step()
             self._logger.info("evaluating now!")
 
             val_loss, _ = self.evaluate(dataset="val", batches_seen=batches_seen)
 
             end_time = time.time()
+
+            # Step the learning rate scheduler AFTER optimizer.step()
+            lr_scheduler.step()
 
             self._writer.add_scalar("training loss", np.mean(losses), batches_seen)
 
@@ -433,7 +439,7 @@ class DCRNNSupervisor:
                         batches_seen,
                         np.mean(losses),
                         val_loss,
-                        lr_scheduler.get_lr()[0],
+                        lr_scheduler.get_last_lr()[0],
                         (end_time - start_time),
                     )
                 )
@@ -449,7 +455,7 @@ class DCRNNSupervisor:
                         batches_seen,
                         np.mean(losses),
                         test_loss,
-                        lr_scheduler.get_lr()[0],
+                        lr_scheduler.get_last_lr()[0],
                         (end_time - start_time),
                     )
                 )
