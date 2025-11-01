@@ -118,6 +118,11 @@ class DCRNNSupervisor:
         config = dict(self._kwargs)
         config['model_state_dict'] = self.dcrnn_model.state_dict()
         config['epoch'] = epoch
+        # Save scaler state for inference
+        config['scaler'] = {
+            'mean': self.standard_scaler.mean,
+            'std': self.standard_scaler.std
+        }
         torch.save(config, 'models/epo%d.tar' % epoch)
         self._logger.info("Saved model at {}".format(epoch))
         return 'models/epo%d.tar' % epoch
@@ -127,7 +132,19 @@ class DCRNNSupervisor:
         assert os.path.exists('models/epo%d.tar' % self._epoch_num), 'Weights at epoch %d not found' % self._epoch_num
         checkpoint = torch.load('models/epo%d.tar' % self._epoch_num, map_location='cpu')
         self.dcrnn_model.load_state_dict(checkpoint['model_state_dict'])
-        self._logger.info("Loaded model at {}".format(self._epoch_num))
+
+        # Restore scaler if available in checkpoint
+        if 'scaler' in checkpoint:
+            self.standard_scaler = StandardScaler(
+                mean=checkpoint['scaler']['mean'],
+                std=checkpoint['scaler']['std']
+            )
+            self._logger.info("Loaded model and scaler at {}".format(self._epoch_num))
+        else:
+            self._logger.warning(
+                "Loaded model at {} but scaler not found in checkpoint. "
+                "Using scaler from data loader.".format(self._epoch_num)
+            )
 
     def _setup_graph(self):
         with torch.no_grad():
@@ -316,3 +333,66 @@ class DCRNNSupervisor:
         y_true = self.standard_scaler.inverse_transform(y_true)
         y_predicted = self.standard_scaler.inverse_transform(y_predicted)
         return masked_mae_loss(y_predicted, y_true)
+
+    def predict(self, x, batches_seen=0, apply_scaling=False):
+        """
+        Make predictions on input data.
+
+        Args:
+            x: Input data as numpy array of shape (batch_size, seq_len, num_nodes, input_dim).
+               By default, expects SCALED data (same scale as training data).
+            batches_seen: Number of batches seen (for curriculum learning, default: 0)
+            apply_scaling: If True, applies standard scaling to input before prediction.
+                          Set to True if input data is in ORIGINAL/UNSCALED form.
+                          Default: False (assumes input is already scaled)
+
+        Returns:
+            numpy array of predictions in ORIGINAL/UNSCALED form, shape:
+            (horizon, batch_size, num_nodes, output_dim)
+
+        Example:
+            # For already-scaled data (typical when loading from preprocessed dataset):
+            predictions = supervisor.predict(x_scaled)
+
+            # For raw/unscaled data:
+            predictions = supervisor.predict(x_raw, apply_scaling=True)
+        """
+        with torch.no_grad():
+            self.dcrnn_model = self.dcrnn_model.eval()
+
+            # Validate input
+            if not isinstance(x, np.ndarray):
+                raise ValueError(f"Input must be a numpy array, got {type(x)}")
+
+            expected_shape = (None, self.seq_len, self.num_nodes, self.input_dim)
+            if x.ndim != 4 or x.shape[1:] != expected_shape[1:]:
+                raise ValueError(
+                    f"Input shape must be (batch_size, {self.seq_len}, {self.num_nodes}, {self.input_dim}), "
+                    f"got {x.shape}"
+                )
+
+            # Apply scaling if requested
+            if apply_scaling:
+                x_scaled = x.copy()
+                x_scaled[..., 0] = self.standard_scaler.transform(x[..., 0])
+            else:
+                x_scaled = x
+
+            # Prepare data for model
+            x_tensor = torch.from_numpy(x_scaled).float()
+            x_tensor = x_tensor.permute(1, 0, 2, 3)  # (seq_len, batch_size, num_nodes, input_dim)
+            batch_size = x_tensor.size(1)
+            x_tensor = x_tensor.view(self.seq_len, batch_size, self.num_nodes * self.input_dim)
+            x_tensor = x_tensor.to(device)
+
+            # Make prediction (output is scaled)
+            output = self.dcrnn_model(x_tensor, batches_seen=batches_seen)
+
+            # Apply inverse scaling to get back to original scale
+            output = self.standard_scaler.inverse_transform(output)
+
+            # Convert to numpy and reshape
+            output = output.cpu().numpy()
+            output = output.reshape(self.horizon, batch_size, self.num_nodes, self.output_dim)
+
+            return output
