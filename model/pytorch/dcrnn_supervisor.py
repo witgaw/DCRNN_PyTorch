@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from typing import Any, Dict, Optional
@@ -8,6 +9,7 @@ from dcrnn_pytorch.lib import utils
 from dcrnn_pytorch.lib.utils import DataLoader, StandardScaler
 from dcrnn_pytorch.model.pytorch.dcrnn_model import DCRNNModel
 from dcrnn_pytorch.model.pytorch.loss import masked_mae_loss
+from safetensors.torch import load_file, save_file
 from torch.utils.tensorboard import SummaryWriter
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -93,6 +95,9 @@ class DCRNNSupervisor:
         if self._epoch_num > 0:
             self.load_model()
 
+        self._save_epoch = -1
+        self._save_state = None
+
     @staticmethod
     def _get_log_dir(kwargs):
         log_dir = kwargs["train"].get("log_dir")
@@ -125,10 +130,7 @@ class DCRNNSupervisor:
             os.makedirs(log_dir)
         return log_dir
 
-    def save_model(self, epoch):
-        if not os.path.exists("models/"):
-            os.makedirs("models/")
-
+    def _get_config_for_saving(self, epoch):
         config = dict(self._kwargs)
         config["model_state_dict"] = self.dcrnn_model.state_dict()
         config["epoch"] = epoch
@@ -137,19 +139,12 @@ class DCRNNSupervisor:
             "mean": self.standard_scaler.mean,
             "std": self.standard_scaler.std,
         }
-        torch.save(config, "models/epo%d.tar" % epoch)
-        self._logger.info("Saved model at {}".format(epoch))
-        return "models/epo%d.tar" % epoch
+        return config
 
-    def load_model(self):
+    def _load_from_checkpoint(self, checkpoint):
         self._setup_graph()
-        assert os.path.exists("models/epo%d.tar" % self._epoch_num), (
-            "Weights at epoch %d not found" % self._epoch_num
-        )
-        checkpoint = torch.load(
-            "models/epo%d.tar" % self._epoch_num, map_location="cpu"
-        )
-        self.dcrnn_model.load_state_dict(checkpoint["model_state_dict"])
+        self._save_state = checkpoint["model_state_dict"]
+        self.dcrnn_model.load_state_dict(self._save_state)
 
         # Restore scaler if available in checkpoint
         if "scaler" in checkpoint:
@@ -162,6 +157,136 @@ class DCRNNSupervisor:
                 "Loaded model at {} but scaler not found in checkpoint. "
                 "Using scaler from data loader.".format(self._epoch_num)
             )
+
+        if "epoch" in checkpoint:
+            self._epoch_num = checkpoint["epoch"]
+            self._save_epoch = checkpoint["epoch"]
+
+    def save_model(self, epoch):
+        if not os.path.exists("models/"):
+            os.makedirs("models/")
+
+        config = self._get_config_for_saving(epoch)
+
+        torch.save(config, "models/epo%d.tar" % epoch)
+        self._logger.info("Saved model at {}".format(epoch))
+        return "models/epo%d.tar" % epoch
+
+    def load_model(self):
+        assert os.path.exists("models/epo%d.tar" % self._epoch_num), (
+            "Weights at epoch %d not found" % self._epoch_num
+        )
+        checkpoint = torch.load(
+            "models/epo%d.tar" % self._epoch_num, map_location="cpu"
+        )
+
+        self._load_from_checkpoint(checkpoint=checkpoint)
+
+    def _get_model_path(self, save_dir, use_safetensors=True):
+        if use_safetensors:
+            return os.path.join(save_dir, "model.safetensors")
+        else:
+            return os.path.join(save_dir, "dcrnn_model.pth")
+
+    def _get_config_path(self, save_dir):
+        return os.path.join(save_dir, "config.json")
+
+    def save_best_to_dir(self, save_dir, use_safetensors=True):
+        """
+        Save model to a custom directory in SafeTensors format (HuggingFace compatible).
+
+        Args:
+            save_dir: Directory path to save the model
+            use_safetensors: If True, saves in SafeTensors format. If False, uses PyTorch format.
+
+        Returns:
+            str: Path to the saved model file
+        """
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        # Get the full config
+        config = (
+            self._save_state
+            if self._save_state
+            else self._get_config_for_saving(self._epoch_num)
+        )
+
+        if use_safetensors:
+            # Extract model state dict for SafeTensors
+            model_state_dict = config["model_state_dict"]
+            model_path = self._get_model_path(save_dir, use_safetensors=True)
+
+            # Save model weights in SafeTensors format
+            save_file(model_state_dict, model_path)
+
+            # Save config metadata separately as JSON
+            config_path = self._get_config_path(save_dir)
+            metadata = {
+                "epoch": config.get("epoch", self._epoch_num),
+                "scaler": config.get("scaler"),
+                "model_config": self._model_kwargs,
+                "data_config": self._data_kwargs,
+                "train_config": self._train_kwargs,
+            }
+
+            with open(config_path, "w") as f:
+                json.dump(metadata, f, indent=2, default=str)
+
+            self._logger.info(
+                f"Saved model to {model_path} and config to {config_path}"
+            )
+            return model_path
+        else:
+            # Original PyTorch format
+            model_path = self._get_model_path(save_dir, use_safetensors=False)
+            torch.save(config, model_path)
+            self._logger.info(f"Saved model to {model_path}")
+            return model_path
+
+    def load_from_dir(self, load_dir, use_safetensors=True):
+        """
+        Load model from a custom directory (supports both SafeTensors and PyTorch formats).
+
+        Args:
+            load_dir: Directory path containing the model file
+            use_safetensors: If True, loads from SafeTensors format. If False, loads PyTorch format.
+        """
+        if use_safetensors:
+            model_path = self._get_model_path(load_dir, use_safetensors=True)
+            config_path = self._get_config_path(load_dir)
+
+            if not os.path.exists(model_path) or not os.path.exists(config_path):
+                raise FileNotFoundError(
+                    f"SafeTensors model file ({model_path}) or config file ({config_path}) not found"
+                )
+
+            # Load model weights
+            model_state_dict = load_file(model_path)
+
+            # Load config metadata
+            with open(config_path, "r") as f:
+                metadata = json.load(f)
+
+            # Reconstruct checkpoint format
+            checkpoint = {
+                "model_state_dict": model_state_dict,
+                "epoch": metadata.get("epoch"),
+                "scaler": metadata.get("scaler"),
+            }
+
+            self._load_from_checkpoint(checkpoint=checkpoint)
+            self._logger.info(f"Loaded model from {model_path}")
+        else:
+            # Original PyTorch format
+            model_path = self._get_model_path(load_dir, use_safetensors=False)
+
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Model file not found: {model_path}")
+
+            checkpoint = torch.load(model_path, map_location="cpu")
+            self._load_from_checkpoint(checkpoint=checkpoint)
+            self._logger.info(f"Loaded model from {model_path}")
 
     def _setup_graph(self):
         with torch.no_grad():
@@ -332,6 +457,8 @@ class DCRNNSupervisor:
 
             if val_loss < min_val_loss:
                 wait = 0
+                self._save_epoch = epoch_num
+                self._save_state = self._get_config_for_saving(epoch_num)
                 if save_model:
                     model_file_name = self.save_model(epoch_num)
                     self._logger.info(
