@@ -147,13 +147,14 @@ class DCRNNSupervisor:
         self.dcrnn_model.load_state_dict(self._save_state)
 
         if "epoch" in checkpoint:
-            self._epoch_num = checkpoint["epoch"]
-            self._save_epoch = checkpoint["epoch"]
+            self._epoch_num = int(checkpoint["epoch"])
+            self._save_epoch = int(checkpoint["epoch"])
 
         # Restore scaler if available in checkpoint
         if "scaler" in checkpoint:
             self.standard_scaler = StandardScaler(
-                mean=checkpoint["scaler"]["mean"], std=checkpoint["scaler"]["std"]
+                mean=float(checkpoint["scaler"]["mean"]),
+                std=float(checkpoint["scaler"]["std"]),
             )
             self._logger.info("Loaded model and scaler at {}".format(self._epoch_num))
         else:
