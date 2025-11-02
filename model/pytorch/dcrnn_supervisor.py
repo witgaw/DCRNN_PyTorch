@@ -146,6 +146,10 @@ class DCRNNSupervisor:
         self._save_state = checkpoint["model_state_dict"]
         self.dcrnn_model.load_state_dict(self._save_state)
 
+        if "epoch" in checkpoint:
+            self._epoch_num = checkpoint["epoch"]
+            self._save_epoch = checkpoint["epoch"]
+
         # Restore scaler if available in checkpoint
         if "scaler" in checkpoint:
             self.standard_scaler = StandardScaler(
@@ -157,10 +161,6 @@ class DCRNNSupervisor:
                 "Loaded model at {} but scaler not found in checkpoint. "
                 "Using scaler from data loader.".format(self._epoch_num)
             )
-
-        if "epoch" in checkpoint:
-            self._epoch_num = checkpoint["epoch"]
-            self._save_epoch = checkpoint["epoch"]
 
     def save_model(self, epoch):
         if not os.path.exists("models/"):
